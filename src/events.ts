@@ -3,7 +3,7 @@ import { sign } from "./signature.ts";
 export const EVENT_NAMES = ["charge.success", "transfer.success", "refund.processed"] as const;
 export type EventName = (typeof EVENT_NAMES)[number];
 
-const reference = () => `T${Date.now()}${Math.floor(Math.random() * 1e4)}`;
+const reference = () => "T" + Date.now() + Math.floor(Math.random() * 1e4);
 
 const samples: Record<EventName, () => unknown> = {
   "charge.success": () => ({
@@ -46,7 +46,7 @@ const samples: Record<EventName, () => unknown> = {
 /** A compact JSON sample event, shaped like Paystack's. Fake data only. */
 export function sampleEvent(name: string): string {
   if (!(EVENT_NAMES as readonly string[]).includes(name)) {
-    throw new Error(`Unknown event "${name}". Supported: ${EVENT_NAMES.join(", ")}`);
+    throw new Error("Unknown event \"" + name + "\". Supported: " + EVENT_NAMES.join(", "));
   }
   return JSON.stringify(samples[name as EventName]());
 }

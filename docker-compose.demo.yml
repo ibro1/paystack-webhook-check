@@ -1,8 +1,307 @@
 services:
   app:
-    build: .
-    restart: unless-stopped
+    image: node:22-alpine
+    working_dir: /app
+    command: ["node", "src/server.ts"]
     environment:
       PORT: "3000"
     expose:
       - "3000"
+    configs:
+      - source: src_server_ts
+        target: /app/src/server.ts
+      - source: src_diagnose_ts
+        target: /app/src/diagnose.ts
+      - source: src_signature_ts
+        target: /app/src/signature.ts
+      - source: src_events_ts
+        target: /app/src/events.ts
+      - source: public_index_html
+        target: /app/public/index.html
+      - source: package_json
+        target: /app/package.json
+configs:
+  src_server_ts:
+    content: |
+      import { createServer, type Server } from "node:http";
+      import { readFileSync } from "node:fs";
+      import { diagnose } from "./diagnose.ts";
+      import { signedSample, EVENT_NAMES } from "./events.ts";
+
+      const page = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
+      const MAX = 1_000_000;
+
+      function readBody(req: import("node:http").IncomingMessage): Promise<string> {
+        return new Promise((resolve, reject) => {
+          let size = 0;
+          const chunks: Buffer[] = [];
+          req.on("data", (c: Buffer) => {
+            size += c.length;
+            if (size > MAX) {
+              reject(new Error("too large"));
+              req.destroy();
+            } else chunks.push(c);
+          });
+          req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+          req.on("error", reject);
+        });
+      }
+
+      /** Stateless: nothing from a request is stored or logged. */
+      export function createApp(): Server {
+        return createServer(async (req, res) => {
+          const json = (status: number, value: unknown) => {
+            res.writeHead(status, { "content-type": "application/json" });
+            res.end(JSON.stringify(value));
+          };
+          try {
+            const url = new URL(req.url ?? "/", "http://x");
+            if (req.method === "GET" && url.pathname === "/healthz") return json(200, { ok: true });
+            if (req.method === "GET" && url.pathname === "/") {
+              res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+              return void res.end(page);
+            }
+            if (req.method === "POST" && url.pathname === "/api/diagnose") {
+              let input: { body?: unknown; signature?: unknown; secret?: unknown; otherSecrets?: unknown };
+              try {
+                input = JSON.parse(await readBody(req));
+              } catch {
+                return json(400, { error: "Send JSON: { body, signature, secret }" });
+              }
+              if (typeof input.body !== "string" || typeof input.signature !== "string" || typeof input.secret !== "string" || !input.secret) {
+                return json(400, { error: "body, signature and secret must be strings" });
+              }
+              const others = Array.isArray(input.otherSecrets) ? input.otherSecrets.filter((s): s is string => typeof s === "string") : [];
+              return json(200, diagnose(input.body, input.signature, input.secret, others));
+            }
+            if (req.method === "POST" && url.pathname === "/api/sample") {
+              let input: { event?: unknown; secret?: unknown };
+              try {
+                input = JSON.parse(await readBody(req));
+              } catch {
+                return json(400, { error: "Send JSON: { event, secret }" });
+              }
+              if (typeof input.event !== "string" || typeof input.secret !== "string" || !input.secret) {
+                return json(400, { error: "event (" + EVENT_NAMES.join(", ") + ") and secret are required" });
+              }
+              try {
+                return json(200, signedSample(input.event, input.secret));
+              } catch (e) {
+                return json(400, { error: (e as Error).message });
+              }
+            }
+            json(404, { error: "not found" });
+          } catch {
+            json(500, { error: "error" });
+          }
+        });
+      }
+
+      if (import.meta.url === "file://" + process.argv[1]) {
+        const port = Number(process.env.PORT ?? 3000);
+        createApp().listen(port, "0.0.0.0", () => console.log("paystack-webhook-check on :" + port));
+      }
+
+  src_diagnose_ts:
+    content: |
+      import { verify } from "./signature.ts";
+
+      export type Cause =
+        | "valid"
+        | "bad-signature-format"
+        | "trailing-whitespace"
+        | "reserialised-json"
+        | "test-key-vs-live-key"
+        | "wrong-secret";
+
+      export interface Diagnosis {
+        valid: boolean;
+        cause: Cause;
+        hint: string;
+      }
+
+      const result = (valid: boolean, cause: Cause, hint: string): Diagnosis => ({ valid, cause, hint });
+
+      /**
+       * Explain why a signature does or does not match. `otherSecrets` are keys to try
+       * when the main one fails (for example your live key while testing with the test key).
+       */
+      export function diagnose(rawBody: string, signature: string, secret: string, otherSecrets: string[] = []): Diagnosis {
+        const sig = signature.trim();
+        if (!/^[0-9a-f]{128}$$/i.test(sig)) {
+          return result(
+            false,
+            "bad-signature-format",
+            "The x-paystack-signature header should be 128 hex characters. Check that you read the header (not the body), that it is not empty, and that no quotes or prefix were added.",
+          );
+        }
+        if (verify(rawBody, sig, secret)) {
+          return result(true, "valid", "The signature matches the raw body and the secret key.");
+        }
+        if (rawBody !== rawBody.trim() && verify(rawBody.trim(), sig, secret)) {
+          return result(
+            false,
+            "trailing-whitespace",
+            "The signature matches only after removing leading or trailing whitespace. Your server adds or keeps a newline; sign the exact bytes Paystack sent.",
+          );
+        }
+        try {
+          const compact = JSON.stringify(JSON.parse(rawBody));
+          if (compact !== rawBody && verify(compact, sig, secret)) {
+            return result(
+              false,
+              "reserialised-json",
+              "The signature matches the compact JSON, not the body you gave. A framework parsed and re-serialised the body. Capture the raw request bytes before any JSON middleware (for example express.raw or a verify callback in express.json).",
+            );
+          }
+        } catch {
+          // not JSON: nothing to re-serialise
+        }
+        for (const other of otherSecrets) {
+          if (other && verify(rawBody, sig, other)) {
+            return result(
+              false,
+              "test-key-vs-live-key",
+              "The signature matches one of the other keys you supplied. You are verifying with the wrong environment key: Paystack signs with the secret key of the mode (test or live) that sent the event.",
+            );
+          }
+        }
+        return result(
+          false,
+          "wrong-secret",
+          "The signature is well formed but matches nothing we tried. Check that you use the secret key (sk_...), not the public key, and that it belongs to the same mode (test or live) as the event.",
+        );
+      }
+
+  src_signature_ts:
+    content: |
+      import { createHmac, timingSafeEqual } from "node:crypto";
+
+      /** HMAC-SHA512 (lowercase hex) of the raw body, as Paystack sends in x-paystack-signature. */
+      export function sign(rawBody: string, secret: string): string {
+        return createHmac("sha512", secret).update(rawBody, "utf8").digest("hex");
+      }
+
+      /** Constant-time check; a malformed signature is simply false. */
+      export function verify(rawBody: string, signature: string, secret: string): boolean {
+        if (!/^[0-9a-f]{128}$$/i.test(signature)) return false;
+        const expected = Buffer.from(sign(rawBody, secret), "hex");
+        const given = Buffer.from(signature, "hex");
+        return expected.length === given.length && timingSafeEqual(expected, given);
+      }
+
+  src_events_ts:
+    content: |
+      import { sign } from "./signature.ts";
+
+      export const EVENT_NAMES = ["charge.success", "transfer.success", "refund.processed"] as const;
+      export type EventName = (typeof EVENT_NAMES)[number];
+
+      const reference = () => "T" + Date.now() + Math.floor(Math.random() * 1e4);
+
+      const samples: Record<EventName, () => unknown> = {
+        "charge.success": () => ({
+          event: "charge.success",
+          data: {
+            id: 302961,
+            status: "success",
+            reference: reference(),
+            amount: 500000,
+            currency: "NGN",
+            channel: "card",
+            paid_at: new Date().toISOString(),
+            customer: { email: "customer@example.com" },
+          },
+        }),
+        "transfer.success": () => ({
+          event: "transfer.success",
+          data: {
+            id: 80227,
+            status: "success",
+            reference: reference(),
+            amount: 1000000,
+            currency: "NGN",
+            reason: "Sample payout",
+            transferred_at: new Date().toISOString(),
+          },
+        }),
+        "refund.processed": () => ({
+          event: "refund.processed",
+          data: {
+            id: 1203,
+            status: "processed",
+            transaction_reference: reference(),
+            amount: 500000,
+            currency: "NGN",
+          },
+        }),
+      };
+
+      /** A compact JSON sample event, shaped like Paystack's. Fake data only. */
+      export function sampleEvent(name: string): string {
+        if (!(EVENT_NAMES as readonly string[]).includes(name)) {
+          throw new Error("Unknown event \"" + name + "\". Supported: " + EVENT_NAMES.join(", "));
+        }
+        return JSON.stringify(samples[name as EventName]());
+      }
+
+      export function signedSample(name: string, secret: string): { body: string; signature: string } {
+        const body = sampleEvent(name);
+        return { body, signature: sign(body, secret) };
+      }
+
+  public_index_html:
+    content: |
+      <!doctype html>
+      <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+      <title>Paystack webhook check</title>
+      <style>
+      :root{color-scheme:light dark;font-family:system-ui,sans-serif}
+      body{max-width:760px;margin:2rem auto;padding:0 1rem}
+      h1{font-size:1.5rem}label{display:block;margin-top:1rem;font-weight:600}
+      textarea,input{width:100%;box-sizing:border-box;font:0.9rem ui-monospace,monospace;padding:.5rem}
+      textarea{min-height:7rem}button{margin-top:1rem;padding:.6rem 1.2rem;font-size:1rem;cursor:pointer}
+      #out{margin-top:1.5rem;padding:1rem;border-radius:8px;border:2px solid gray;display:none}
+      #out.ok{border-color:#1a9c4b}#out.bad{border-color:#d33}small{opacity:.7}
+      </style></head><body>
+      <h1>Paystack webhook check</h1>
+      <p>Paste the <b>raw</b> request body, the <code>x-paystack-signature</code> header and your secret key. Nothing is stored.</p>
+      <label>Raw body<textarea id="body" placeholder='{"event":"charge.success","data":{...}}'></textarea></label>
+      <label>x-paystack-signature<input id="sig"></label>
+      <label>Secret key (sk_test_… or sk_live_…)<input id="secret" type="password" autocomplete="off"></label>
+      <label>Another key to try (optional)<input id="other" type="password" autocomplete="off"></label>
+      <button id="go">Check signature</button> <button id="demo" type="button">Fill a signed sample</button>
+      <div id="out"><b id="cause"></b><p id="hint"></p></div>
+      <p><small>Source: github.com/ibro1/paystack-webhook-check · Fake sample data only.</small></p>
+      <script>
+      const $$=id=>document.getElementById(id);
+      $$("go").onclick=async()=>{
+        const r=await fetch("/api/diagnose",{method:"POST",headers:{"content-type":"application/json"},
+          body:JSON.stringify({body:$$("body").value,signature:$$("sig").value,secret:$$("secret").value,otherSecrets:$$("other").value?[$$("other").value]:[]})});
+        const d=await r.json();const o=$$("out");o.style.display="block";
+        if(!r.ok){o.className="bad";$$("cause").textContent="Error";$$("hint").textContent=d.error;return}
+        o.className=d.valid?"ok":"bad";$$("cause").textContent=(d.valid?"Valid: ":"Invalid: ")+d.cause;$$("hint").textContent=d.hint;
+      };
+      $$("demo").onclick=async()=>{
+        const secret=$$("secret").value||"sk_test_demo";$$("secret").value=secret;
+        const r=await fetch("/api/sample",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({event:"charge.success",secret})});
+        const s=await r.json();$$("body").value=s.body;$$("sig").value=s.signature;
+      };
+      </script></body></html>
+
+  package_json:
+    content: |
+      {
+        "name": "paystack-webhook-check",
+        "version": "0.1.0",
+        "description": "Verify and debug Paystack webhook signatures, and send signed sample events to your endpoint.",
+        "license": "MIT",
+        "type": "module",
+        "bin": { "paystack-webhook-check": "src/cli.ts" },
+        "engines": { "node": ">=22.18" },
+        "scripts": {
+          "test": "node --test \"test/*.test.ts\"",
+          "start": "node src/server.ts"
+        }
+      }
+

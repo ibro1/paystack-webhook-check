@@ -57,7 +57,7 @@ export function createApp(): Server {
           return json(400, { error: "Send JSON: { event, secret }" });
         }
         if (typeof input.event !== "string" || typeof input.secret !== "string" || !input.secret) {
-          return json(400, { error: `event (${EVENT_NAMES.join(", ")}) and secret are required` });
+          return json(400, { error: "event (" + EVENT_NAMES.join(", ") + ") and secret are required" });
         }
         try {
           return json(200, signedSample(input.event, input.secret));
@@ -72,7 +72,7 @@ export function createApp(): Server {
   });
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.url === "file://" + process.argv[1]) {
   const port = Number(process.env.PORT ?? 3000);
-  createApp().listen(port, "0.0.0.0", () => console.log(`paystack-webhook-check on :${port}`));
+  createApp().listen(port, "0.0.0.0", () => console.log("paystack-webhook-check on :" + port));
 }
