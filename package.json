@@ -1,0 +1,13 @@
+{
+  "name": "paystack-webhook-check",
+  "version": "0.1.0",
+  "description": "Verify and debug Paystack webhook signatures, and send signed sample events to your endpoint.",
+  "license": "MIT",
+  "type": "module",
+  "bin": { "paystack-webhook-check": "src/cli.ts" },
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "test": "node --test test/",
+    "start": "node src/server.ts"
+  }
+}
