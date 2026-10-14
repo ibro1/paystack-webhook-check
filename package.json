@@ -7,7 +7,7 @@
   "bin": { "paystack-webhook-check": "src/cli.ts" },
   "engines": { "node": ">=22.18" },
   "scripts": {
-    "test": "node --test test/",
+    "test": "node --test \"test/*.test.ts\"",
     "start": "node src/server.ts"
   }
 }

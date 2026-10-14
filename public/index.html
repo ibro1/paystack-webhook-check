@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Paystack webhook check</title>
+<style>
+:root{color-scheme:light dark;font-family:system-ui,sans-serif}
+body{max-width:760px;margin:2rem auto;padding:0 1rem}
+h1{font-size:1.5rem}label{display:block;margin-top:1rem;font-weight:600}
+textarea,input{width:100%;box-sizing:border-box;font:0.9rem ui-monospace,monospace;padding:.5rem}
+textarea{min-height:7rem}button{margin-top:1rem;padding:.6rem 1.2rem;font-size:1rem;cursor:pointer}
+#out{margin-top:1.5rem;padding:1rem;border-radius:8px;border:2px solid gray;display:none}
+#out.ok{border-color:#1a9c4b}#out.bad{border-color:#d33}small{opacity:.7}
+</style></head><body>
+<h1>Paystack webhook check</h1>
+<p>Paste the <b>raw</b> request body, the <code>x-paystack-signature</code> header and your secret key. Nothing is stored.</p>
+<label>Raw body<textarea id="body" placeholder='{"event":"charge.success","data":{...}}'></textarea></label>
+<label>x-paystack-signature<input id="sig"></label>
+<label>Secret key (sk_test_… or sk_live_…)<input id="secret" type="password" autocomplete="off"></label>
+<label>Another key to try (optional)<input id="other" type="password" autocomplete="off"></label>
+<button id="go">Check signature</button> <button id="demo" type="button">Fill a signed sample</button>
+<div id="out"><b id="cause"></b><p id="hint"></p></div>
+<p><small>Source: github.com/ibro1/paystack-webhook-check · Fake sample data only.</small></p>
+<script>
+const $=id=>document.getElementById(id);
+$("go").onclick=async()=>{
+  const r=await fetch("/api/diagnose",{method:"POST",headers:{"content-type":"application/json"},
+    body:JSON.stringify({body:$("body").value,signature:$("sig").value,secret:$("secret").value,otherSecrets:$("other").value?[$("other").value]:[]})});
+  const d=await r.json();const o=$("out");o.style.display="block";
+  if(!r.ok){o.className="bad";$("cause").textContent="Error";$("hint").textContent=d.error;return}
+  o.className=d.valid?"ok":"bad";$("cause").textContent=(d.valid?"Valid: ":"Invalid: ")+d.cause;$("hint").textContent=d.hint;
+};
+$("demo").onclick=async()=>{
+  const secret=$("secret").value||"sk_test_demo";$("secret").value=secret;
+  const r=await fetch("/api/sample",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({event:"charge.success",secret})});
+  const s=await r.json();$("body").value=s.body;$("sig").value=s.signature;
+};
+</script></body></html>

@@ -5,12 +5,12 @@ import { sign, verify } from "../src/signature.ts";
 const body = '{"event":"charge.success","data":{"amount":500000}}';
 const secret = "sk_test_example";
 
-test("sign returns 128 hex chars of HMAC-SHA512 (known vector)", () => {
-  const sig = sign(body, secret);
+test("sign returns 128 hex chars of HMAC-SHA512 (known vector, checked with openssl)", () => {
+  const sig = sign("hello", "key");
   assert.match(sig, /^[0-9a-f]{128}$/);
   assert.equal(
     sig,
-    "a9b2f1ea0ef5c5f6d3b76c6e27d9ac4b8e0b0a8f3f0b9d8d0e1dc2d4f1d1a6d8e1e7f7c4fa4a9dd7b0cc6b2a3d9a54a3e52b0d1a3a8f1c11cf2c7a7b3f6d0b3e1c",
+    "ff06ab36757777815c008d32c8e14a705b4e7bf310351a06a23b612dc4c7433e7757d20525a5593b71020ea2ee162d2311b247e9855862b270122419652c0c92",
   );
 });
 
